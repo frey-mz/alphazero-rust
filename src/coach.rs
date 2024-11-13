@@ -1,9 +1,9 @@
 use crate::{
-    arena::grouped_simulations, environment::{Environment, SimulationResult}, mcts::{SearchOptions, MCTS}, net::NeuralNet
+    arena::{grouped_simulations, grouped_simulations_against_random}, environment::{Environment, SimulationResult}, mcts::{MCTSState, SearchOptions, MCTS}, net::NeuralNet
 };
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, fmt::Display, io::Write, sync::Arc};
 
-use burn::prelude::*;
+use burn::{prelude::*, tensor::backend::AutodiffBackend};
 
 pub struct CoachOptions {
     pub temp_threshold: usize,
@@ -16,15 +16,16 @@ pub struct CoachOptions {
 pub fn execute_episode<
     'a,
     const ACTION_SIZE: usize,
-    State: Clone + std::hash::Hash + Eq,
+    State: Clone + std::hash::Hash + Eq + Display + MCTSState,
     BurnBackend: Backend,
 >(
     coach_options: Arc<CoachOptions>,
     search_options: Arc<SearchOptions>,
     p1: &impl NeuralNet<ACTION_SIZE, State = State, BurnBackend = BurnBackend>,
     p2: &impl NeuralNet<ACTION_SIZE, State = State, BurnBackend = BurnBackend>,
+    device: &Device<BurnBackend>,
     env: &impl Environment<ACTION_SIZE, State = State, BurnBackend = BurnBackend>,
-) -> Vec<(State, Tensor<BurnBackend, 1, Float>, f64)>{
+) -> (Vec<(State, Tensor<BurnBackend, 1, Float>, f64)>, SimulationResult){
     let mut p1_training_examples = vec![];
     let mut p2_training_examples = vec![];
 
@@ -38,9 +39,11 @@ pub fn execute_episode<
         } else {
             0.0
         };
-        println!("getting move 1");
         let mut search = MCTS::new(search_options.clone(), env);
-        let prob = search.get_action_probability(&s1, p1, temperature);
+        let prob = search.get_action_probability(&s1, p1, device, temperature);
+
+        assert!(s1.is_action_perspective());
+
         let syms = env.get_symmetrical_policies(&s1, &prob);
 
         let best_move = prob
@@ -58,17 +61,20 @@ pub fn execute_episode<
         s1 = env.get_next_state(&s1, best_move);
 
         if let Some(result) = env.get_simulation_result(&s1) {
-            return combine_training_examples(p1_training_examples, p2_training_examples, result)
+            return (combine_training_examples(p1_training_examples, p2_training_examples, result), result)
         }
 
         s2 = env.get_next_state(&s2, best_move);
 
         if let Some(result) = env.get_simulation_result(&s2) {
-            return combine_training_examples(p2_training_examples, p1_training_examples, result)
+            return (combine_training_examples(p2_training_examples, p1_training_examples, result), result.inverse())
         }
 
         let mut search = MCTS::new(search_options.clone(), env);
-        let prob = search.get_action_probability(&s2, p2, temperature);
+        let prob = search.get_action_probability(&s2, p2, device, temperature);
+
+        assert!(s2.is_action_perspective());
+
         let syms = env.get_symmetrical_policies(&s2, &prob);
 
         let best_move = prob
@@ -85,17 +91,17 @@ pub fn execute_episode<
 
         s1 = env.get_next_state(&s1, best_move);
 
+        //println!("{s1}");
+
         if let Some(result) = env.get_simulation_result(&s1) {
-            return combine_training_examples(p1_training_examples, p2_training_examples, result)
+            return (combine_training_examples(p1_training_examples, p2_training_examples, result), result)
         }
 
         s2 = env.get_next_state(&s2, best_move);
 
         if let Some(result) = env.get_simulation_result(&s2) {
-            return combine_training_examples(p2_training_examples, p1_training_examples, result)
+            return (combine_training_examples(p2_training_examples, p1_training_examples, result), result.inverse())
         }
-
-        println!("step!");
     }
 }
 
@@ -117,19 +123,28 @@ fn combine_training_examples<BurnBackend: Backend, State>(
 pub fn learn<
     'a,
     const ACTION_SIZE: usize,
-    State: Clone + std::hash::Hash + Eq,
-    BurnBackend: Backend,
+    State: Clone + std::hash::Hash + Eq + Display + MCTSState + Send,
+    BurnBackend: Backend + AutodiffBackend,
 >(
     coach_options: Arc<CoachOptions>,
     search_options: Arc<SearchOptions>,
     mut agent: impl NeuralNet<ACTION_SIZE, State = State, BurnBackend = BurnBackend>,
+    device: &Device<BurnBackend>,
     env: &impl Environment<ACTION_SIZE, State = State, BurnBackend = BurnBackend>,
 )->impl NeuralNet<ACTION_SIZE, State = State, BurnBackend = BurnBackend>{
     let mut total_training_examples: VecDeque<Vec<(State, Tensor<BurnBackend, 1>, f64)>> = VecDeque::new();
 
     for _iterations in 0..coach_options.iterations{
-        let training_examples: Vec<(State, Tensor<BurnBackend, 1>, f64)> = execute_episode(coach_options.clone(), search_options.clone(), &agent, &agent, env);
-        println!("episode executed~");
+        let mut training_examples: Vec<(State, Tensor<BurnBackend, 1>, f64)> = vec![];
+
+        for i in 0..coach_options.episodes{
+            let (mut v, _) = execute_episode(coach_options.clone(), search_options.clone(), &agent, &agent, device, env);
+            training_examples.append(&mut v);
+            print!("{i} ");
+            std::io::stdout().flush().unwrap();
+        }
+        println!();
+
         total_training_examples.push_back(training_examples);
 
         if total_training_examples.len() > coach_options.max_iterations_for_training{
@@ -138,14 +153,19 @@ pub fn learn<
 
         let training_data: Vec<_> = total_training_examples.iter().flatten().collect();
 
-        let mut prospective_agent = agent.clone();
-        prospective_agent.train(training_data);
+        let prospective_agent = agent.train(training_data, device);
         
-        let (prospective_agent_wins, agent_wins, _draws) = grouped_simulations(coach_options.episodes, search_options.clone(), 0.0, &prospective_agent, &agent, env);
+        println!("training over");
+        
+        let (prospective_agent_wins, agent_wins, _draws) = grouped_simulations(coach_options.episodes, search_options.clone(), 0.0, &prospective_agent, &agent, device, env);
 
         let non_draws = agent_wins as f64 + prospective_agent_wins as f64;
 
         if (non_draws!=0.0) && prospective_agent_wins as f64 / non_draws >= coach_options.update_threshold{
+
+            let (prospective_agent_wins, random_wins, _draws) = grouped_simulations_against_random(coach_options.episodes, search_options.clone(), 0.0, &prospective_agent, device, env);
+            println!("{}% win against random", ((prospective_agent_wins as f64)/(prospective_agent_wins as f64 + random_wins as f64) * 100.0).round());
+
             agent = prospective_agent;
         }
     }

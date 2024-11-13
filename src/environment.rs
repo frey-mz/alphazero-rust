@@ -1,5 +1,5 @@
 use burn::prelude::*;
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SimulationResult{
     Win,
     Loss,
@@ -22,9 +22,7 @@ impl SimulationResult{
     }
 }
 
-
-
-pub trait Environment<const ACTION_SIZE: usize>{
+pub trait Environment<const ACTION_SIZE: usize> : Sync{
     type State;
     type BurnBackend: Backend;
 
