@@ -4,6 +4,7 @@ use crate::{
 use std::{collections::VecDeque, fmt::Display, io::Write, sync::Arc};
 
 use burn::{prelude::*, tensor::backend::AutodiffBackend};
+use rand::{seq::SliceRandom, thread_rng};
 
 pub struct CoachOptions {
     pub temp_threshold: usize,
@@ -144,6 +145,8 @@ pub fn learn<
             std::io::stdout().flush().unwrap();
         }
         println!();
+
+        training_examples.shuffle(&mut thread_rng());
 
         total_training_examples.push_back(training_examples);
 

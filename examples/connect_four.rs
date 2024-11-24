@@ -1,3 +1,4 @@
+use alphazero_rust::arena::grouped_simulations_against_random;
 use alphazero_rust::coach::{learn, CoachOptions};
 use alphazero_rust::environment::{Environment, SimulationResult};
 use alphazero_rust::mcts::{MCTSState, SearchOptions};
@@ -23,31 +24,36 @@ use burn::train::ValidStep;
 use burn::train::{LearnerBuilder, TrainStep};
 use nn::loss::{CrossEntropyLoss, CrossEntropyLossConfig, MseLoss};
 use nn::{BatchNorm, BatchNormConfig, PaddingConfig2d};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use std::fmt::{Display, Write};
 use std::sync::Arc;
 fn main() {
-    /* 
+     
     let coach_options = Arc::new(CoachOptions {
         temp_threshold: 100,
-        episodes: 20,
+        episodes: 10,
         iterations: 10,
         max_iterations_for_training: 50,
         update_threshold: 0.55,
     });
     let search_options = Arc::new(SearchOptions {
-        cpuct: 1.0,
-        rollout_count: 10,
+        cpuct: 1.25,
+        rollout_count: 100,
     });
 
     let device = WgpuDevice::BestAvailable;
-    let agent = Connect4Net::new(&device);
+    let agent = Connect4Random;
 
     let env = Connect4;
 
-    learn(coach_options, search_options, agent, &device, &env);*/
- 
+    let (prospective_agent_wins, random_wins, _draws) = grouped_simulations_against_random(coach_options.episodes, search_options.clone(), 0.0, &agent, &device, &env);
+    println!("{}% win against random", ((prospective_agent_wins as f64)/(prospective_agent_wins as f64 + random_wins as f64) * 100.0).round());
+
+//    learn(coach_options, search_options, agent, &device, &env);
+ /* 
     let search_options = Arc::new(SearchOptions {
-        cpuct: 1.0,
+        cpuct: 1.25,
         rollout_count: 200,
     });
 
@@ -57,8 +63,8 @@ fn main() {
 
     use CellType::*;
 
-    let state = Connect4State{
-        turn: false,
+    let mut state = Connect4State{
+        turn: true,
         board: Board([
             [Empty, Empty, Empty, Empty, Empty, Empty, Empty],
             [Empty, Empty, Empty, Empty, Empty, Empty, Empty],
@@ -70,9 +76,31 @@ fn main() {
         ])
     };
 
-    let mut search = alphazero_rust::mcts::MCTS::new(search_options.clone(), &env);
-    let _ = search.get_action_probability(&state, &agent, &device, 0.5);
-    search.write_graph(&state, "p");
+    for i in 0..{
+        let mut search = alphazero_rust::mcts::MCTS::new(search_options.clone(), &env);
+        let policy = search.get_action_probability(&state, &agent, &device, 0.0);
+        let policy : Vec<_> = policy
+        .into_data()
+        .iter::<f64>()
+        .enumerate().collect();
+
+        let best_move = policy.choose_weighted(&mut thread_rng(), |x|x.1).unwrap().0;
+
+        search.write_graph(&state, &format!("dots/{i}.dot"));
+
+        state = env.get_next_state(&state, best_move);
+        state = state.to_active_perspective();
+
+        println!("{state}");
+
+        if env.get_simulation_result(&state).is_some(){
+            break;
+        }
+
+
+    }
+*/
+
 
 }
 
@@ -90,7 +118,7 @@ impl NeuralNet<7> for Connect4Random{
     }
     
     fn train(&self, training_data: Vec<&(Self::State, Tensor<Self::BurnBackend, 1>, f64)>, device: &<Self::BurnBackend as Backend>::Device)->Self {
-        todo!()
+        self.clone()
     }
 
 }

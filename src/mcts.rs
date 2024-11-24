@@ -7,6 +7,7 @@ const EPS: f64 = 1e-8;
 use burn::{prelude::*, tensor::cast::ToElement};
 use petgraph::graph::{DiGraph, NodeIndex};
 use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 use crate::{
     environment::{Environment, SimulationResult},
@@ -135,8 +136,6 @@ impl<
         net: &impl NeuralNet<ACTION_SIZE, State = State, BurnBackend = BurnBackend>,
         device: &Device<BurnBackend>,
     ) -> f64 {
-        //println!("{}", state);
-
         match self.arena.get(state) {
             None => {
                 //
@@ -195,7 +194,7 @@ impl<
             Some(NodeType::Terminal(simulation_result)) => simulation_result.to_value(),
             Some(NodeType::Branch(node)) => {
                 let mut cur_best = f64::NEG_INFINITY;
-                let mut best_action = 0;
+                let mut best_actions = vec![];
 
                 for action in 0..ACTION_SIZE {
                     if !node.valids[action] {
@@ -205,17 +204,29 @@ impl<
                     let visits = node.visits as f64;
                     let policy = node.policy[action];
                     let exp = if node.edges[action].visits != 0 {
-                        node.edges[action].q_value
+                        let q_value = if state.is_action_perspective(){
+                            node.edges[action].q_value
+                        }else{
+                            -node.edges[action].q_value
+                        };
+
+                        q_value
                             + self.options.cpuct * policy * visits.sqrt() / (1.0 + node.edges[action].visits as f64)
                     } else {
                         self.options.cpuct * policy * (visits + EPS).sqrt()
                     };
+
                     if exp > cur_best {
                         cur_best = exp;
-                        best_action = action;
+                        best_actions = vec![action];
+                    }else if exp == cur_best{
+                        best_actions.push(action);
                     }
                 }
-                self.search_and_backprop(state, best_action, net, device)
+
+                let best_action = best_actions.choose(&mut thread_rng()).unwrap();
+
+                self.search_and_backprop(state, *best_action, net, device)
             }
         }
     }
@@ -225,7 +236,7 @@ impl<
         self.create_petgraph_node(state, &mut graph);
         let dot = petgraph::dot::Dot::new(&graph);
 
-        println!("graph genned, total states in hash: {}", self.arena.len());
+        //println!("graph genned, total states in hash: {}", self.arena.len());
 
         std::fs::write(path, dot.to_string()).expect("Unable to write file");
     }
@@ -233,22 +244,22 @@ impl<
     pub fn create_petgraph_node(
         &self,
         state: &State,
-        graph: &mut DiGraph<State, MCTSEdge>,
+        graph: &mut DiGraph<GraphNode<State>, MCTSEdge>,
     ) -> Option<NodeIndex> {
         //let node = graph.add_node(state.clone());
         match self.arena.get(state) {
             None => None,
             Some(NodeType::Terminal(_simulation_result)) => {
-                println!("added terminal state");
+                //println!("added terminal state");
 
-                let index = graph.add_node(state.clone());
+                let index = graph.add_node(GraphNode { state: state.clone(), visits: None });
 
                 Some(index)
             }
             Some(NodeType::Branch(node)) => {
-                println!("added branch state");
+                //println!("added branch state");
 
-                let index = graph.add_node(state.clone());
+                let index = graph.add_node(GraphNode { state: state.clone(), visits: Some(node.visits) });
 
                 for action in 0..ACTION_SIZE {
                     let new_state = self.env.get_next_state(state, action);
@@ -262,6 +273,23 @@ impl<
         }
     }
 }
+
+pub struct GraphNode<State : Display>{
+    state: State,
+    visits: Option<usize>,
+}
+
+impl<State : Display> Display for GraphNode<State>{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(visits) = self.visits{
+            f.write_fmt(format_args!("state: {} visits: {}", self.state, visits))
+        }else{
+            f.write_fmt(format_args!("TERMINAL state: {}", self.state))
+
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct MCTSEdge {
     visits: usize,
@@ -273,7 +301,6 @@ impl Display for MCTSEdge {
         f.write_fmt(format_args!(
             "visits: {} q_value: {}",
             self.visits, self.q_value
-        ))?;
-        Ok(())
+        ))
     }
 }
